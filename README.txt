@@ -16,7 +16,8 @@ lho
 Github: 
 https://github.com/MatheusOliveiraSilva/problema-da-equacao-de-calor
 
-Abraços!
+
+
 
 ------------------------------------------------------------------------
 
