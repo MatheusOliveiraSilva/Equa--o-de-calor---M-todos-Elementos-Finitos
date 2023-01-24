@@ -1,0 +1,368 @@
+import numpy as np
+import math
+import matplotlib.pyplot as plt
+
+# ----- Funções Auxiliares ----- #
+def delta(i, j):
+    return 1 if i == j else 0
+
+def C_matrix(lamb, mu):
+    C = np.zeros((2, 2, 2, 2))
+    for i in range(1,3):
+        for j in range(1,3):
+            for k in range(1,3):
+                for l in range(1,3):
+                    C[i-1, j-1, k-1, l-1] = lamb*delta(i, j)*delta(k, l) + mu*(delta(i, k)*delta(j, l) + delta(i, l)*delta(j, k))
+    return C
+
+def C(lamb, mu, i, j, k, l):
+    return lamb*delta(i, j)*delta(k, l) + mu*(delta(i, k)*delta(j, l) + delta(i, l)*delta(j, k))
+
+# def sigma(lamb, mu, E):
+#     σ = np.zeros((2, 2))
+#     tr_E = np.trace(E)
+#     for i in range(1,3):
+#         for j in range(1,3):
+#             σ[i-1, j-1] = lamb*tr_E*delta(i,j) + 2*mu*E[i-1,j-1]
+#     return σ
+
+# ----- Funcoes de interpolacao ----- #
+def Phi_1(xi, eta):
+    return ((1 - xi)*(1 - eta)) / 4
+
+def Phi_2(xi, eta):
+    return ((1 + xi)*(1 - eta)) / 4
+
+def Phi_3(xi, eta):
+    return ((1 + xi)*(1 + eta)) / 4
+
+def Phi_4(xi, eta):
+    return ((1 - xi)*(1 + eta)) / 4
+
+def dPhi1_dxi(xi, eta): return (-(1 - eta)) / 4
+def dPhi1_deta(xi, eta): return (-(1 - xi)) / 4
+
+def dPhi2_dxi(xi, eta): return (1 - eta) / 4
+def dPhi2_deta(xi, eta): return (-(1 + xi)) / 4
+
+def dPhi3_dxi(xi, eta): return (1 + eta) / 4
+def dPhi3_deta(xi, eta): return (1 + xi) / 4
+
+def dPhi4_dxi(xi, eta): return (-(1 + eta)) / 4
+def dPhi4_deta(xi, eta): return (1 - xi) / 4
+
+def posicao_no(A):
+    # Position (i, j) of node A
+    i = (A-1) % (Nel_x + 1) + 1
+    j = (A-1) // (Nel_x + 1) + 1
+    return [i, j]
+
+def no_global(i, j):
+    # Global number of node with position (i, j)
+    return (j-1)*(Nel_x + 1) + i
+
+def coord_malha(A):
+    # Coordinates of node A
+    x = np.linspace(a, b, Nel_x + 1)
+    y = np.linspace(c, d, Nel_y + 1)
+
+    i, j = posicao_no(A)
+    return [x[i-1], y[j-1]]
+
+def numeracao_elemento(e):
+    # Global numbering of the first node of element e
+    i = (e-1) % Nel_x + 1
+    j = (e-1) // Nel_x + 1
+    return no_global(i, j)
+
+def coord_elemento(e):
+    coord_local = np.zeros((4, 2))
+    for i in range(1,5):
+        coord_local[i-1, :] = coord[LG[i-1, e-1]-1]
+    return coord_local
+
+def jacobiano(xi, eta, coords):
+    grad = np.array([
+        [dPhi1_dxi(xi, eta), dPhi2_dxi(xi, eta), dPhi3_dxi(xi, eta), dPhi4_dxi(xi, eta)],
+        [dPhi1_deta(xi, eta), dPhi2_deta(xi, eta), dPhi3_deta(xi, eta), dPhi4_deta(xi, eta)]
+    ])
+
+    return grad, np.matmul(grad, coords)  # J = grad*coords
+
+def matriz_local(e):
+    PG = [-0.5773502691, 0.5773502691]  # pontos de Gauss
+    w = [1, 1] # pesos de Gauss
+    N_int = len(PG)                  # numero de pontos em cada direcao
+    coord_local = coord_elemento(e)
+
+    K_e = np.zeros((8, 8))
+    for p in range(1, N_int+1):
+        for q in range(1, N_int+1):
+            grad, J = jacobiano(PG[p-1], PG[q-1], coord_local)
+            det_J = np.linalg.det(J)
+            if det_J <= 0:
+                raise ValueError("Determinante negativo!")
+            W = w[p-1]*w[q-1]*det_J
+            B = np.matmul(np.linalg.inv(J), grad)
+            for a in range(1,5):
+                for b in range(1,5):
+                    for r in range(1,3):
+                        for s in range(1,3):
+                            for i in range(1,3):
+                                for j in range(1,3):
+                                    m = 2*(a-1) + r
+                                    n = 2*(b-1) + s
+                                    K_e[m-1, n-1] += C(lamb, mu, i, r, j, s)*B[i-1, a-1]*B[j-1, b-1]* W  # ∫(∇φᵀ)C(∇φ) dΩ
+    return K_e
+
+def matriz_global(K, K_e, e):
+    for a in range(1, 5):
+        for b in range(1, 5):
+            for r in range(1, 3):
+                for s in range(1, 3):
+                    i = EQ[r-1][LG[a-1][e-1]-1]
+                    j = EQ[s-1][LG[b-1][e-1]-1]
+                    if (i != 0) and (j != 0):
+                        m = 2*(a - 1) + r
+                        n = 2*(b - 1) + s
+                        K[i-1][j-1] += K_e[m-1][n-1]
+    return K
+
+def F_aux(e):
+    PG = [-0.5773502691, 0.5773502691]  # Gauss points
+    w = [1, 1] # weights
+    N_int = len(PG)                   # number of points in each direction
+    coord_local = coord_elemento(e)
+
+    # Internal heat generation
+    M = np.zeros((4,4))
+    for a in range(1, N_int+1):
+        for b in range(1, N_int+1):
+            _, J = jacobiano(PG[a-1], PG[b-1], coord_local)
+            det_J = np.linalg.det(J)
+            if det_J <= 0:
+                raise ValueError("Determinante Negativo!")
+
+            Phi = [
+                Phi_1(PG[a-1], PG[b-1]),
+                Phi_2(PG[a-1], PG[b-1]),
+                Phi_3(PG[a-1], PG[b-1]),
+                Phi_4(PG[a-1], PG[b-1])
+                ]
+            W = w[a-1]*w[b-1]*det_J
+            for m in range(4):
+                for n in range(4):
+                    M[m, n] += Phi[m]*Phi[n]*W
+    return coord_local, M
+
+def F_local(K_e, e):
+    coord_local, M = F_aux(e)
+    f_e = np.zeros(8)
+    aux = np.zeros((4,2))
+    for a in range(1,5):
+        aux[a-1, :] = f(coord_local[a-1, :])
+    aux = np.matmul(M, aux)
+    for b in range(1,5):
+        for r in range(1,3):
+            m = 2*(b-1) + r
+            f_e[m-1] = aux[b-1, r-1]
+    f_p = F_prescrito(K_e, e)  # Condição prescrita
+    return f_e - f_p
+
+def F_prescrito(K_e, e):
+    p_aux = P[:, LG[:, e-1]-1]
+    p = np.zeros(8)
+    for a in range(1,5):
+        for r in range(1,3):
+            m = 2*(a - 1) + r
+            p[m-1] = p_aux[r-1, a-1]
+    return np.matmul(K_e, p)
+
+def F_global(F, F_e, e):
+    for a in range(1,5):
+        for r in range(1,3):
+            m = 2*(a-1) + r
+            i = EQ[r-1, LG[a-1, e-1]-1]
+            if i != 0:
+                F[i-1] += F_e[m-1]
+    return F
+
+# ----- Função auxiliar para cond. contorno Dirichlet ----- #
+def define_contorno(idx, bdy):
+    for n in range(4):
+        for i in idx[n]:
+            pos = coord[i]
+            P[:, i] = bdy[n](pos)
+
+# ----- Montando a malha ----- #
+a, b = [0, 1]
+c, d = [0, 2]
+Nel_x = 4
+Nel_y = 4
+Nnos = (Nel_x + 1)*(Nel_y + 1)
+Nel = Nel_x*Nel_y
+
+#coord = [np.zeros(2, dtype=np.float64) for _ in range(Nnos)]
+
+#for i in range(Nnos):
+#    coord[i] = coord_malha(i)
+
+#LG = np.zeros((4, Nel), dtype=np.int64)
+
+
+coord = np.array([
+        [0.0, 0.0],
+        [0.25, 0.0],
+        [0.5, 0.0],
+        [0.75, 0.0],
+        [1.0, 0.0],
+        [0.0, 0.5],
+        [0.25, 0.5],
+        [0.5, 0.5],
+        [0.75, 0.5],
+        [1.0, 0.5],
+        [0.0, 1.0],
+        [0.25, 1.0],
+        [0.5, 1.0],
+        [0.75, 1.0],
+        [1.0, 1.0],
+        [0.0, 1.5],
+        [0.25, 1.5],
+        [0.5, 1.5],
+        [0.75, 1.5],
+        [1.0, 1.5],
+        [0.0, 2.0],
+        [0.25, 2.0],
+        [0.5, 2.0],
+        [0.75, 2.0],
+        [1.0, 2.0],
+       ])
+
+LG = np.array([
+     [1 , 2 , 3 ,  4 ,  6 ,  7 ,  8 ,  9 , 11 , 12 , 13 , 14 , 16 , 17 , 18 , 19],
+     [2 , 3 , 4 , 5 ,  7 ,  8 ,  9 , 10 , 12 , 13 , 14 , 15 , 17 , 18 , 19 , 20],
+     [7 , 8 , 9 , 10 , 12 , 13 , 14 , 15 , 17 , 18 , 19 , 20 , 22 , 23 , 24 , 25],
+     [6 , 7 , 8 ,  9 , 11 , 12 , 13 , 14 , 16 , 17 , 18 , 19 , 21 , 22 , 23 , 24 ]
+     ])
+
+#for i in range(1, Nel+1):
+#   LG[0, i-1] = numeracao_elemento(i)
+#    LG[1, i-1] = LG[0, i-1] + 1
+#   LG[2, i-1] = LG[1, i-1] + Nel_x + 1
+#    LG[3, i-1] = LG[2, i-1] - 1
+
+bdy1 = lambda X: [1/(math.pi**2)*(math.cos(math.pi*X[0])), 0]      # Borda inferior
+bdy2 = lambda X: [1/(math.pi**2)*(-math.cos(math.pi*X[1])), 0]     # Borda da direita
+bdy3 = lambda X: [1/(math.pi**2)*(math.cos(math.pi*X[0])), 0]      # Borda de cima
+bdy4 = lambda X: [1/(math.pi**2)*(math.cos(math.pi*X[1])), 0]      # Borda da esquerda
+
+# ----- Identifica os nós do contorno ----- #
+idx1 = [i for i, x in enumerate(coord) if x[1] == c]
+idx2 = [i for i, x in enumerate(coord) if x[0] == b]
+idx2 = idx2[1:-1]
+idx3 = [i for i, x in enumerate(coord) if x[1] == d]
+idx4 = [i for i, x in enumerate(coord) if x[0] == a]
+idx4 = idx4[1:-1]
+
+P = np.zeros((2, Nnos))
+define_contorno([idx1, idx2, idx3, idx4], [bdy1, bdy2, bdy3, bdy4])
+
+idx_contorno = np.concatenate((idx1, idx2, idx3, idx4))
+
+EQ = np.array( 
+                [[0 , 0 , 0 , 0 , 0 , 0 , 1 , 3 , 5 , 0 , 0 , 7 ,  9 , 11 , 0 , 0 , 13 , 15 , 17 , 0 , 0 , 0 , 0 , 0 , 0],
+                 [0 , 0 , 0 , 0 , 0 , 0 , 2 , 4 , 6 , 0 , 0 , 8 , 10 , 12 , 0 , 0 , 14 , 16 , 18 , 0 , 0 , 0 , 0 , 0 , 0]] 
+             )
+
+
+#EQ = np.zeros((2, Nnos), dtype=np.int64)
+#eq_id = 1
+#for i in range(Nnos):
+ #   if i not in idx_contorno:
+ #      EQ[0, i] = eq_id
+  #      EQ[1, i] = eq_id + 1
+  #      eq_id += 2
+
+Neq = np.amax(EQ)
+
+# ----- Dados do problema ----- #
+mu = 1       # Constantes de Lamé
+lamb = 1.5
+
+f = lambda X: 2*np.array([
+    math.cos(math.pi*X[0])*math.cos(math.pi*X[1]),
+    math.sin(math.pi*X[0])*math.sin(math.pi*X[1])
+    ])
+
+# ----- Monta o sistema linear ----- #
+
+K = np.zeros((Neq, Neq))
+F = np.zeros(Neq)
+
+for e in range(1, Nel+1):
+    K_e = matriz_local(e)
+    matriz_global(K, K_e, e)
+    F_e = F_local(K_e, e)
+    F_global(F, F_e, e)
+
+# ----- Solução numérica ----- #
+u_num = np.linalg.solve(K, F)
+
+# ----- Solução exata ----- #
+
+idx_eq = [i for i in range(Nnos) if i not in idx_contorno]
+u = lambda X: 1/(math.pi**2)*np.array([
+    math.cos(math.pi*X[0])*math.cos(math.pi*X[1]),
+    math.sin(math.pi*X[0])*math.sin(math.pi*X[1])
+    ])
+
+x_sol = [coord[i] for i in idx_eq]
+
+u_exato = np.array([u(x) for x in x_sol])
+u_an = np.zeros(2*len(idx_eq))
+for a in range(1, len(u_exato)+1):
+    for r in range(1,3):
+        m = 2*(a-1) + r
+        u_an[m-1] = u_exato[a-1][r-1]
+
+# ----- Cálculo de Erro ----- #
+num = np.linalg.norm(u_num - u_an)
+den = np.linalg.norm(u_an)
+erro = round(num / den * 100, 2)
+print("\nErro relativo: {} %".format(erro))
+
+print("Solucao analitica: \n")
+print(u_an)
+print("\n")
+print("Solucao numerica: \n")
+print(u_num)
+
+
+# ===================== PLOT DOS RESULTADOS ======================= #
+# ----- Malha inicial ----- #
+plotar = False
+if plotar:
+    x_pos = [coord[i][0] for i in range(len(coord))]
+    y_pos = [coord[i][1] for i in range(len(coord))]
+    plt1 = plt.scatter(x_pos, y_pos, aspect='equal', legend=False)
+
+    # ----- Malha apos deformação ----- #
+    coord_final = [np.zeros(2) for _ in range(Nnos)]
+    for i in range(len(coord)):
+        # Condição de contorno
+        coord_final[i] = coord[i] + P[:, i]
+
+    u_x = u_num[0:2:-1]
+    u_y = u_num[1:2:]
+
+    for i in range(len(idx_eq)):
+        # Deslocamento calculado
+        coord_final[idx_eq[i]] = coord[idx_eq[i]] + [u_x[i], u_y[i]]
+
+    x_pos_final = [coord_final[i][0] for i in range(len(coord))]
+    y_pos_final = [coord_final[i][1] for i in range(len(coord))]
+    plt2 = plt.scatter(x_pos_final, y_pos_final, legend=False, aspect='equal')
+
+    # display(plt1)
+    plt.show()
+print("")
